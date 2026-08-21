@@ -1,0 +1,328 @@
+# Place this file at .github/workflows/publish.yml in the PUBLIC repo (record10/record-synth-public)
+# Builds are free & unlimited on public GitHub repositories.
+#
+# REQUIRED SECRETS (Repository or Org Level - record10):
+#   - PRIVATE_REPO_PAT                   : Fine-grained PAT with Contents:Read on record10/record-synth
+#   - TAURI_SIGNING_PRIVATE_KEY          : Tauri update signing key
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD : Password for the signing key
+#   - ANDROID_KEYSTORE_BASE64            : Base64-encoded upload keystore
+#   - KEYSTORE_PASSWORD                  : Keystore password
+#   - KEY_ALIAS                          : Key alias
+#   - KEY_PASSWORD                       : Key password
+#
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build from (private repo)"
+        required: true
+        default: "main"
+        type: choice
+        options:
+          - qa
+          - main
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # Desktop builds (macOS Apple Silicon, macOS Intel, Windows, Linux)
+  # ─────────────────────────────────────────────────────────────────────
+  build-desktop:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: mac-apple-silicon
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            label: mac-intel
+          - platform: windows-latest
+            target: desktop
+            label: windows
+          - platform: ubuntu-22.04
+            target: desktop
+            label: linux
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      # ─── Clone source from private repo ───
+      - name: Clone private repository
+        shell: bash
+        run: |
+          git clone --depth 1 --branch ${{ inputs.branch }} \
+            https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/record10/record-synth.git .
+
+      # ─── Common setup ───
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target != 'desktop' && matrix.target || '' }}
+
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libssl-dev build-essential
+
+      # ─── Build frontend ───
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      # ─── Read version from tauri.conf.json ───
+      - name: Get Version
+        id: get_version
+        shell: bash
+        run: |
+          VERSION=$(grep '"version":' src-tauri/tauri.conf.json | head -n 1 | awk -F: '{ print $2 }' | sed 's/[", ]//g')
+          echo "Building version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Determine Release Config
+        id: release_config
+        shell: bash
+        run: |
+          if [[ "${{ inputs.branch }}" == "qa" ]]; then
+            echo "type=qa" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "tag=v${{ steps.get_version.outputs.version }}-qa.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+            if [[ -f "src-tauri/tauri.conf.qa.json" ]]; then
+              if [[ "$RUNNER_OS" == "Windows" ]]; then
+                choco install jq -y
+              fi
+              jq -s '.[0] * .[1]' src-tauri/tauri.conf.json src-tauri/tauri.conf.qa.json > src-tauri/tauri.conf.merged.json
+              mv src-tauri/tauri.conf.merged.json src-tauri/tauri.conf.json
+            fi
+          else
+            echo "type=prod" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "tag=v${{ steps.get_version.outputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      # ─── Patch tauri.conf.json ───
+      - name: Remove beforeBuildCommand (frontend already built)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            choco install jq -y 2>/dev/null || true
+          fi
+          jq 'del(.build.beforeBuildCommand, .build.beforeDevCommand)' src-tauri/tauri.conf.json > src-tauri/tauri.conf.temp.json
+          mv src-tauri/tauri.conf.temp.json src-tauri/tauri.conf.json
+
+      # ─── Desktop build (macOS, Windows, Linux) ───
+      - name: Build Tauri Desktop App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ steps.release_config.outputs.tag }}
+          releaseName: "Record Synth ${{ steps.release_config.outputs.tag }}"
+          releaseBody: "See the assets to download this version and install."
+          releaseDraft: false
+          prerelease: ${{ steps.release_config.outputs.prerelease == 'true' }}
+          args: ${{ matrix.target != 'desktop' && format('--target {0}', matrix.target) || '' }}
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Android build (APK + AAB)
+  # ─────────────────────────────────────────────────────────────────────
+  build-android:
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      # ─── Clone source from private repo ───
+      - name: Clone private repository
+        shell: bash
+        run: |
+          git clone --depth 1 --branch ${{ inputs.branch }} \
+            https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/record10/record-synth.git .
+
+      # ─── Common setup ───
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
+
+      # ─── Build frontend ───
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      # ─── Read version from tauri.conf.json ───
+      - name: Get Version
+        id: get_version
+        shell: bash
+        run: |
+          VERSION=$(grep '"version":' src-tauri/tauri.conf.json | head -n 1 | awk -F: '{ print $2 }' | sed 's/[", ]//g')
+          echo "Building version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Determine Release Config
+        id: release_config
+        shell: bash
+        run: |
+          if [[ "${{ inputs.branch }}" == "qa" ]]; then
+            echo "type=qa" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "tag=v${{ steps.get_version.outputs.version }}-qa.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+            if [[ -f "src-tauri/tauri.conf.qa.json" ]]; then
+              jq -s '.[0] * .[1]' src-tauri/tauri.conf.json src-tauri/tauri.conf.qa.json > src-tauri/tauri.conf.merged.json
+              mv src-tauri/tauri.conf.merged.json src-tauri/tauri.conf.json
+            fi
+          else
+            echo "type=prod" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "tag=v${{ steps.get_version.outputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      # ─── Patch tauri.conf.json ───
+      - name: Remove beforeBuildCommand (frontend already built)
+        shell: bash
+        run: |
+          jq 'del(.build.beforeBuildCommand, .build.beforeDevCommand)' src-tauri/tauri.conf.json > src-tauri/tauri.conf.temp.json
+          mv src-tauri/tauri.conf.temp.json src-tauri/tauri.conf.json
+
+      # ─── Decode Android keystore ───
+      - name: Decode Android keystore
+        shell: bash
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > /tmp/upload-keystore.jks
+
+      # ─── Build Android ───
+      - name: Initialize Tauri Android
+        run: npx tauri android init
+
+      - name: Generate Multi-Resolution App Icons
+        shell: bash
+        run: |
+          if [ -f "scripts/generate-icons.sh" ]; then
+            bash scripts/generate-icons.sh
+          fi
+
+      - name: Build Android APK & AAB
+        shell: bash
+        run: |
+          npx tauri android build --target aarch64
+        env:
+          NDK_HOME: ${{ env.NDK_HOME }}
+
+      # ─── Sign the APK ───
+      - name: Sign APK
+        shell: bash
+        run: |
+          UNSIGNED_APK=$(find src-tauri/gen/android -name "*.apk" -path "*release*" | head -1)
+          if [ -z "$UNSIGNED_APK" ]; then
+            UNSIGNED_APK=$(find src-tauri/gen/android -name "*.apk" | head -1)
+          fi
+          echo "Found APK: $UNSIGNED_APK"
+
+          BUILD_TOOLS_DIR="${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)"
+
+          # Align and sign APK
+          ${BUILD_TOOLS_DIR}/zipalign -v 4 "$UNSIGNED_APK" /tmp/recordsynth-aligned.apk
+          ${BUILD_TOOLS_DIR}/apksigner sign \
+            --ks /tmp/upload-keystore.jks \
+            --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
+            --out /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.apk \
+            /tmp/recordsynth-aligned.apk
+
+      # ─── Sign the AAB ───
+      - name: Sign AAB
+        shell: bash
+        run: |
+          UNSIGNED_AAB=$(find src-tauri/gen/android -name "*.aab" -path "*release*" | head -1)
+          if [ -z "$UNSIGNED_AAB" ]; then
+            echo "Building AAB..."
+            cd src-tauri/gen/android
+            ./gradlew bundleUniversalRelease
+            UNSIGNED_AAB=$(find . -name "*.aab" -path "*release*" | head -1)
+          fi
+          echo "Found AAB: $UNSIGNED_AAB"
+
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+            --keystore /tmp/upload-keystore.jks \
+            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+            -keypass "${{ secrets.KEY_PASSWORD }}" \
+            "$UNSIGNED_AAB" "${{ secrets.KEY_ALIAS }}"
+
+          cp "$UNSIGNED_AAB" /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.aab
+
+      # ─── Upload APK & AAB to GitHub Release ───
+      - name: Upload to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.release_config.outputs.tag }}"
+          APK_PATH="/tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.apk"
+          AAB_PATH="/tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.aab"
+
+          REPO="${{ github.repository }}"
+
+          # Wait for the release to be created by desktop builds (or create it)
+          for i in $(seq 1 30); do
+            if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+              echo "Release $TAG found, uploading Android artifacts..."
+              gh release upload "$TAG" "$APK_PATH" "$AAB_PATH" --clobber --repo "$REPO"
+              echo "APK and AAB uploaded successfully!"
+              exit 0
+            fi
+            echo "Waiting for release $TAG to be created... (attempt $i/30)"
+            sleep 30
+          done
+
+          # If release doesn't exist after waiting, create it directly
+          echo "Creating release $TAG..."
+          PRERELEASE_FLAG=""
+          if [[ "${{ steps.release_config.outputs.prerelease }}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$TAG" "$APK_PATH" "$AAB_PATH" \
+            --title "Record Synth $TAG" \
+            --notes "See the assets to download this version and install." \
+            --repo "$REPO" \
+            $PRERELEASE_FLAG
