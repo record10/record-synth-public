@@ -168,7 +168,7 @@ jobs:
           targets: aarch64-linux-android
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -263,7 +263,7 @@ jobs:
           BUILD_TOOLS_DIR="${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)"
 
           # Align APK
-          ${BUILD_TOOLS_DIR}/zipalign -v 4 "$UNSIGNED_APK" /tmp/recordsynth-aligned.apk
+          ${BUILD_TOOLS_DIR}/zipalign -f -p 4 "$UNSIGNED_APK" /tmp/recordsynth-aligned.apk
 
           # Extract alias directly from keystore, fallback to secret
           ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | cut -d',' -f1 | tr -d ' ')
@@ -285,6 +285,9 @@ jobs:
             --key-pass "pass:$KEY_PASS" \
             --out /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.apk \
             /tmp/recordsynth-aligned.apk
+
+          # Verify Signed APK
+          ${BUILD_TOOLS_DIR}/apksigner verify --verbose /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.apk
 
       # ─── Sign the AAB ───
       - name: Sign AAB
