@@ -36,11 +36,8 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            target: aarch64-apple-darwin
-            label: mac-apple-silicon
-          - platform: macos-13
-            target: x86_64-apple-darwin
-            label: mac-intel
+            target: desktop
+            label: macos
           - platform: windows-latest
             target: desktop
             label: windows
