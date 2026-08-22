@@ -265,19 +265,24 @@ jobs:
           # Align APK
           ${BUILD_TOOLS_DIR}/zipalign -v 4 "$UNSIGNED_APK" /tmp/recordsynth-aligned.apk
 
-          # Determine alias
-          ALIAS="${{ secrets.KEY_ALIAS }}"
+          # Extract alias directly from keystore, fallback to secret
+          ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | cut -d',' -f1 | tr -d ' ')
           if [ -z "$ALIAS" ]; then
-            ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | awk -F',' '{print $1}' | tr -d ' ')
+            ALIAS="${{ secrets.KEY_ALIAS }}"
           fi
           echo "Using key alias: $ALIAS"
+
+          KEY_PASS="${{ secrets.KEY_PASSWORD }}"
+          if [ -z "$KEY_PASS" ]; then
+            KEY_PASS="${{ secrets.KEYSTORE_PASSWORD }}"
+          fi
 
           # Sign APK
           ${BUILD_TOOLS_DIR}/apksigner sign \
             --ks /tmp/upload-keystore.jks \
             --ks-key-alias "$ALIAS" \
             --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
-            --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
+            --key-pass "pass:$KEY_PASS" \
             --out /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.apk \
             /tmp/recordsynth-aligned.apk
 
@@ -294,16 +299,21 @@ jobs:
           fi
           echo "Found AAB: $UNSIGNED_AAB"
 
-          ALIAS="${{ secrets.KEY_ALIAS }}"
+          ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | cut -d',' -f1 | tr -d ' ')
           if [ -z "$ALIAS" ]; then
-            ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | awk -F',' '{print $1}' | tr -d ' ')
+            ALIAS="${{ secrets.KEY_ALIAS }}"
           fi
           echo "Using key alias: $ALIAS"
+
+          KEY_PASS="${{ secrets.KEY_PASSWORD }}"
+          if [ -z "$KEY_PASS" ]; then
+            KEY_PASS="${{ secrets.KEYSTORE_PASSWORD }}"
+          fi
 
           jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
             -keystore /tmp/upload-keystore.jks \
             -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
-            -keypass "${{ secrets.KEY_PASSWORD }}" \
+            -keypass "$KEY_PASS" \
             "$UNSIGNED_AAB" "$ALIAS"
 
           cp "$UNSIGNED_AAB" /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.aab
