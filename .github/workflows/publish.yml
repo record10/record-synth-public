@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           git clone --depth 1 --branch ${{ inputs.branch }} \
-            https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/record10/record-synth.git .
+            https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/pritraj/record-synth.git .
 
       # ─── Common setup ───
       - name: Install Node.js
@@ -154,7 +154,7 @@ jobs:
         shell: bash
         run: |
           git clone --depth 1 --branch ${{ inputs.branch }} \
-            https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/record10/record-synth.git .
+            https://x-access-token:${{ secrets.PRIVATE_REPO_PAT }}@github.com/pritraj/record-synth.git .
 
       # ─── Common setup ───
       - name: Install Node.js
