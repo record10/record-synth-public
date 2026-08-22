@@ -228,7 +228,9 @@ jobs:
       - name: Decode Android keystore
         shell: bash
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > /tmp/upload-keystore.jks
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > /tmp/upload-keystore.jks
+          echo "=== Keystore Entries ==="
+          keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}"
 
       # ─── Build Android ───
       - name: Initialize Tauri Android
@@ -260,11 +262,20 @@ jobs:
 
           BUILD_TOOLS_DIR="${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)"
 
-          # Align and sign APK
+          # Align APK
           ${BUILD_TOOLS_DIR}/zipalign -v 4 "$UNSIGNED_APK" /tmp/recordsynth-aligned.apk
+
+          # Determine alias
+          ALIAS="${{ secrets.KEY_ALIAS }}"
+          if [ -z "$ALIAS" ]; then
+            ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | awk -F',' '{print $1}' | tr -d ' ')
+          fi
+          echo "Using key alias: $ALIAS"
+
+          # Sign APK
           ${BUILD_TOOLS_DIR}/apksigner sign \
             --ks /tmp/upload-keystore.jks \
-            --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+            --ks-key-alias "$ALIAS" \
             --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
             --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
             --out /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.apk \
@@ -283,11 +294,17 @@ jobs:
           fi
           echo "Found AAB: $UNSIGNED_AAB"
 
+          ALIAS="${{ secrets.KEY_ALIAS }}"
+          if [ -z "$ALIAS" ]; then
+            ALIAS=$(keytool -list -keystore /tmp/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | grep -i "PrivateKeyEntry" | head -1 | awk -F',' '{print $1}' | tr -d ' ')
+          fi
+          echo "Using key alias: $ALIAS"
+
           jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-            --keystore /tmp/upload-keystore.jks \
+            -keystore /tmp/upload-keystore.jks \
             -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
             -keypass "${{ secrets.KEY_PASSWORD }}" \
-            "$UNSIGNED_AAB" "${{ secrets.KEY_ALIAS }}"
+            "$UNSIGNED_AAB" "$ALIAS"
 
           cp "$UNSIGNED_AAB" /tmp/RecordSynth-${{ steps.get_version.outputs.version }}-arm64.aab
 
